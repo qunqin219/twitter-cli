@@ -207,8 +207,15 @@ class TestBuildGraphqlUrl:
         assert len(url) < 8000, f"URL too long: {len(url)} chars"
 
     def test_searchtimeline_fallback_query_id_regression(self):
-        """Keep SearchTimeline fallback aligned with the live operation after issue #39."""
-        assert FALLBACK_QUERY_IDS["SearchTimeline"] == "VhUd6vHVmLBcw0uX-6jMLA"
+        """SearchTimeline must always have a fallback id (issue #39, #78).
+
+        The concrete value rotates whenever X ships a new web client, so pin the
+        shape and let ``scripts/refresh_query_ids.py`` keep the value current —
+        asserting a literal id here just breaks on every rotation.
+        """
+        value = FALLBACK_QUERY_IDS["SearchTimeline"]
+        assert isinstance(value, str)
+        assert 15 <= len(value) <= 30
 
 
 # ── _best_chrome_target ──────────────────────────────────────────────────

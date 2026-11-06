@@ -6,6 +6,34 @@
 
 A terminal-first CLI for Twitter/X: read timelines, bookmarks, and user profiles without API keys.
 
+> ## Maintained fork
+>
+> Fork of [public-clis/twitter-cli](https://github.com/public-clis/twitter-cli), maintained at
+> [qunqin219/twitter-cli](https://github.com/qunqin219/twitter-cli).
+>
+> **Why fork:** upstream's "live queryId refresh" scans `https://x.com`, which now serves a
+> ~57 KB logged-out entry bundle containing **zero** operation descriptors. The scan resolves
+> nothing, every operation silently falls back to a hardcoded id, and once those go stale X
+> answers with a bare `HTTP 404` — most visibly in `twitter search`. (~20 PRs against this
+> have been open since 2026-05 without review.)
+>
+> **What this fork changes:**
+> - scans the **signed-in** `/home` page and parses `main.<hash>a.js`, the only bundle that
+>   carries the operation table;
+> - sends session cookies with bundle fetches, otherwise the signed-in HTML is never served;
+> - pairs each `operationName` with its **nearest** `queryId`, so key order and nested
+>   `metadata:{…}` objects no longer break extraction;
+> - lets live ids win over cached/fallback ones instead of `setdefault`;
+> - `scripts/refresh_query_ids.py` keeps the hardcoded fallbacks current
+>   (needs `TWITTER_AUTH_TOKEN` + `TWITTER_CT0`).
+>
+> **Install:**
+> ```bash
+> pip install "git+https://github.com/qunqin219/twitter-cli@main"
+> ```
+>
+> Runtime self-heals either way: a 404 triggers the live scan before failing.
+
 ## More Tools
 
 - [xiaohongshu-cli](https://github.com/jackwener/xiaohongshu-cli) — Xiaohongshu (小红书) CLI for notes and account workflows
