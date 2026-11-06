@@ -25,6 +25,20 @@ TWITTER_OPENAPI_URL = (
     "twitter-openapi/refs/heads/main/src/config/placeholder.json"
 )
 
+# ── Live bundle discovery ────────────────────────────────────────────────
+# The signed-in shell is the only page that references main.<hash>a.js, which
+# carries the full operation table; the logged-out page ships a small entry
+# bundle with none of the operations we need.
+_BUNDLE_PAGE_URLS = ("https://x.com/home", "https://x.com")
+_SCRIPT_URL_RE = re.compile(r'https://abs\.twimg\.com/[^"\'\s]+\.js')
+# Operation descriptors are flat objects such as
+#   {queryId:"…",operationName:"…",operationType:"query",metadata:{…}}
+# so match the flat object first and pull both keys out of it; that keeps
+# working regardless of key order and of nested metadata braces.
+_FLAT_OBJECT_RE = re.compile(r"\{[^{}]{0,600}?\}")
+_QUERY_ID_RE = re.compile(r'queryId:\s*"([A-Za-z0-9_-]+)"')
+_OPERATION_NAME_RE = re.compile(r'operationName:\s*"([^"]+)"')
+
 # ── Fallback (hardcoded) queryIds ────────────────────────────────────────
 FALLBACK_QUERY_IDS = {
     "HomeTimeline": "c-CzHF1LboFilMpsx4ZCrQ",
@@ -109,6 +123,10 @@ def _scan_bundles(url_fetch_fn):
     # type: (Any) -> None
     """Scan Twitter JS bundles and cache queryId mappings.
 
+    Prefers the authenticated ``/home`` page: the logged-out shell only ships a
+    tiny entry bundle, while the signed-in page references ``main.<hash>a.js``
+    which carries the full operation table.
+
     Args:
         url_fetch_fn: Function to fetch URLs (injected to avoid circular import).
     """
@@ -119,32 +137,61 @@ def _scan_bundles(url_fetch_fn):
 
     try:
         from .constants import get_user_agent
-        html = url_fetch_fn("https://x.com", {"user-agent": get_user_agent()})
-        script_pattern = re.compile(
-            r'(?:src|href)=["\']'
-            r'(https://abs\.twimg\.com/responsive-web/client-web[^"\']+'
-            r'\.js)'
-            r'["\']'
-        )
-        script_urls = script_pattern.findall(html)
-    except Exception as exc:  # pragma: no cover - network-dependent branch
-        logger.warning("Failed to scan JS bundles: %s", exc)
+    except Exception:  # pragma: no cover - constants always importable
         return
 
+    script_urls = []  # type: list[str]
+    for page_url in _BUNDLE_PAGE_URLS:
+        try:
+            html = url_fetch_fn(page_url, {"user-agent": get_user_agent()})
+        except Exception as exc:  # pragma: no cover - network-dependent branch
+            logger.debug("Bundle page fetch failed (%s): %s", page_url, exc)
+            continue
+        for url in _SCRIPT_URL_RE.findall(html):
+            if url not in script_urls:
+                script_urls.append(url)
+        if any("main." in url for url in _SCRIPT_URL_RE.findall(html)):
+            break  # authenticated page: this is the bundle that matters
+
+    if not script_urls:
+        logger.warning("Failed to scan JS bundles: no script URLs found")
+        return
+
+    # The main bundle holds the whole operation table, so scan it first.
+    script_urls.sort(key=lambda u: 0 if "main." in u else 1)
+
+    resolved = 0
     for script_url in script_urls:
         try:
             bundle = url_fetch_fn(script_url)
-            op_pattern = re.compile(
-                r'queryId:\s*"([A-Za-z0-9_-]+)"[^}]{0,200}'
-                r'operationName:\s*"([^"]+)"'
-            )
-            for match in op_pattern.finditer(bundle):
-                query_id, operation_name = match.group(1), match.group(2)
-                _cached_query_ids.setdefault(operation_name, query_id)
         except Exception:
             continue
+        for operation_name, query_id in _extract_query_ids(bundle).items():
+            if _cached_query_ids.get(operation_name) != query_id:
+                _cached_query_ids[operation_name] = query_id
+                resolved += 1
 
-    logger.info("Scanned %d JS bundles, cached %d query IDs", len(script_urls), len(_cached_query_ids))
+    logger.info("Scanned %d JS bundles, updated %d query IDs", len(script_urls), resolved)
+
+
+def _extract_query_ids(bundle):
+    # type: (str) -> Dict[str, str]
+    """Extract {operationName: queryId} from a JS bundle.
+
+    Scans flat object literals such as
+    ``{queryId:"…",operationName:"…",operationType:"query",metadata:{…}}``
+    so both key orders and nested metadata objects are handled.
+    """
+    pairs = {}  # type: Dict[str, str]
+    query_ids = [(m.start(), m.group(1)) for m in _QUERY_ID_RE.finditer(bundle)]
+    if not query_ids:
+        return pairs
+    for match in _OPERATION_NAME_RE.finditer(bundle):
+        operation_name, op_pos = match.group(1), match.start()
+        nearest = min(((abs(q_pos - op_pos), qid) for q_pos, qid in query_ids), default=None)
+        if nearest and nearest[0] < 400:
+            pairs.setdefault(operation_name, nearest[1])
+    return pairs
 
 
 def _update_features_from_html(html):

@@ -899,7 +899,7 @@ class TwitterClient:
     def _graphql_get(self, operation_name, variables, features, field_toggles=None):
         # type: (str, Dict[str, Any], Dict[str, Any], Optional[Dict[str, Any]]) -> Dict[str, Any]
         """Issue GraphQL GET request with automatic stale-fallback retry."""
-        query_id = _resolve_query_id(operation_name, prefer_fallback=True, url_fetch_fn=_url_fetch)
+        query_id = _resolve_query_id(operation_name, prefer_fallback=True, url_fetch_fn=self._authed_url_fetch)
         using_fallback = query_id == FALLBACK_QUERY_IDS.get(operation_name)
         url = _build_graphql_url(query_id, operation_name, variables, features, field_toggles)
 
@@ -910,7 +910,7 @@ class TwitterClient:
             if exc.status_code in (404, 422) and using_fallback:
                 logger.info("Retrying %s with live queryId after %d", operation_name, exc.status_code)
                 _invalidate_query_id(operation_name)
-                refreshed_query_id = _resolve_query_id(operation_name, prefer_fallback=False, url_fetch_fn=_url_fetch)
+                refreshed_query_id = _resolve_query_id(operation_name, prefer_fallback=False, url_fetch_fn=self._authed_url_fetch)
                 retry_url = _build_graphql_url(refreshed_query_id, operation_name, variables, features, field_toggles)
                 return self._api_get(retry_url)
             raise
@@ -918,7 +918,7 @@ class TwitterClient:
     def _graphql_post(self, operation_name, variables, features=None):
         # type: (str, Dict[str, Any], Optional[Dict[str, Any]]) -> Dict[str, Any]
         """Issue GraphQL POST request with automatic stale-fallback retry."""
-        query_id = _resolve_query_id(operation_name, prefer_fallback=True, url_fetch_fn=_url_fetch)
+        query_id = _resolve_query_id(operation_name, prefer_fallback=True, url_fetch_fn=self._authed_url_fetch)
         using_fallback = query_id == FALLBACK_QUERY_IDS.get(operation_name)
 
         def _do_post(qid):
@@ -935,7 +935,7 @@ class TwitterClient:
             if exc.status_code in (404, 422) and using_fallback:
                 logger.info("Retrying POST %s with live queryId after %d", operation_name, exc.status_code)
                 _invalidate_query_id(operation_name)
-                refreshed = _resolve_query_id(operation_name, prefer_fallback=False, url_fetch_fn=_url_fetch)
+                refreshed = _resolve_query_id(operation_name, prefer_fallback=False, url_fetch_fn=self._authed_url_fetch)
                 return _do_post(refreshed)
             raise
 
@@ -1081,6 +1081,21 @@ class TwitterClient:
             logger.debug("Saved CT cache to %s", cache_path)
         except Exception as exc:
             logger.debug("Failed to save CT cache: %s", exc)
+
+    def _authed_url_fetch(self, url, headers=None):
+        # type: (str, Optional[Dict[str, str]]) -> str
+        """URL fetch that carries the session cookies.
+
+        Bundle scanning must hit the *signed-in* page: the logged-out shell no
+        longer exposes the operation table, so queryId refresh silently fails
+        without cookies.
+        """
+        merged = dict(headers or {})
+        merged.setdefault(
+            "Cookie",
+            self._cookie_string or "auth_token=%s; ct0=%s" % (self._auth_token, self._ct0),
+        )
+        return _url_fetch(url, merged)
 
     def _ensure_client_transaction(self):
         # type: () -> None
