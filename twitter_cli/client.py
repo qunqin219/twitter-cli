@@ -133,6 +133,27 @@ def _url_fetch(url, headers=None):
 # ── TwitterClient ────────────────────────────────────────────────────────
 
 
+def _iter_tweet_results(node):
+    # type: (Any) -> Any
+    """Yield every tweet result dict nested inside a timeline/GraphQL payload."""
+    stack = [node]  # type: list[Any]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            typename = current.get("__typename")
+            if typename == "TweetWithVisibilityResults":
+                inner = current.get("tweet")
+                if isinstance(inner, dict):
+                    stack.append(inner)
+                continue
+            if typename == "Tweet" and isinstance(current.get("rest_id"), str):
+                yield current
+                continue
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+
+
 class TwitterClient:
     """Twitter GraphQL API client using cookie authentication."""
 
@@ -398,11 +419,50 @@ class TwitterClient:
             },
         )
 
+    # Features required to read article bodies off a post.
+    ARTICLE_FEATURES = {
+        "longform_notetweets_consumption_enabled": True,
+        "responsive_web_twitter_article_tweet_consumption_enabled": True,
+        "longform_notetweets_rich_text_read_enabled": True,
+        "longform_notetweets_inline_media_enabled": True,
+        "articles_preview_enabled": True,
+        "articles_rest_api_enabled": True,
+        "responsive_web_graphql_exclude_directive_enabled": True,
+        "verified_phone_label_enabled": False,
+    }
+
     def fetch_article(self, tweet_id):
         # type: (str) -> Tweet
-        """Fetch a Twitter Article by tweet ID."""
+        """Fetch a Twitter Article by tweet ID, article entity ID, or URL.
+
+        ``x.com/i/article/<id>`` links carry the *article entity* id, which lives
+        in a different id space than tweets. When the id is not a tweet, resolve
+        it to the post that carries the article (via search) and read the body
+        off that post.
+        """
         logger.debug("fetch_article: tweet_id=%s", tweet_id)
 
+        tweet = self._fetch_article_tweet(tweet_id)
+        if tweet is not None:
+            return tweet
+
+        resolved = self._resolve_article_tweet_id(tweet_id)
+        if resolved and resolved != tweet_id:
+            logger.info(
+                "fetch_article: resolved article id %s -> tweet %s", tweet_id, resolved
+            )
+            tweet = self._fetch_article_tweet(resolved)
+            if tweet is not None:
+                return tweet
+
+        raise NotFoundError(
+            "Article not found for %s (tried as tweet id and as article entity id)"
+            % tweet_id
+        )
+
+    def _fetch_article_tweet(self, tweet_id):
+        # type: (str) -> Optional[Tweet]
+        """Return the tweet carrying an article body, or None when it has none."""
         data = self._graphql_get(
             "TweetResultByRestId",
             variables={
@@ -428,14 +488,73 @@ class TwitterClient:
 
         result = _deep_get(data, "data", "tweetResult", "result")
         if not result:
-            raise NotFoundError("Article not found: tweet_id=%s" % tweet_id)
+            return None
 
         tweet = parse_tweet_result(result)
         if tweet is None or (tweet.article_title is None and tweet.article_text is None):
-            raise NotFoundError("Tweet %s has no article content" % tweet_id)
-
-        logger.info("fetch_article: tweet_id=%s", tweet_id)
+            return None
         return tweet
+
+    def _resolve_article_tweet_id(self, article_id):
+        # type: (str) -> Optional[str]
+        """Map an article entity id to the id of the tweet that carries it.
+
+        ``ArticleRedirectScreenQuery`` is the direct route X's own client uses on
+        ``x.com/i/article/<id>``: it returns the article's author and the post
+        that carries it. Search-by-id is kept as a fallback for the case where
+        that query id has rotated.
+        """
+        if not article_id.isdigit():
+            return None
+
+        direct = self._resolve_article_tweet_id_direct(article_id)
+        if direct:
+            return direct
+        return self._resolve_article_tweet_id_via_search(article_id)
+
+    def _resolve_article_tweet_id_direct(self, article_id):
+        # type: (str) -> Optional[str]
+        """Resolve an article id through ``ArticleRedirectScreenQuery``."""
+        try:
+            data = self._graphql_get(
+                "ArticleRedirectScreenQuery",
+                variables={"articleEntityId": article_id},
+                features=dict(self.ARTICLE_FEATURES),
+            )
+        except TwitterAPIError as exc:  # pragma: no cover - network dependent
+            logger.debug("fetch_article: article redirect query failed: %s", exc)
+            return None
+
+        tweet_id = _deep_get(
+            data, "data", "article_result_by_rest_id", "result", "metadata", "tweet_results", "rest_id"
+        )
+        return tweet_id if isinstance(tweet_id, str) and tweet_id else None
+
+    def _resolve_article_tweet_id_via_search(self, article_id):
+        # type: (str) -> Optional[str]
+        """Fallback: find the carrying post by searching the article id."""
+        try:
+            data = self._graphql_post(
+                "SearchTimeline",
+                variables={
+                    "rawQuery": article_id,
+                    "count": 20,
+                    "querySource": "typed_query",
+                    "product": "Top",
+                },
+                features=dict(self.ARTICLE_FEATURES),
+            )
+        except TwitterAPIError as exc:  # pragma: no cover - network dependent
+            logger.debug("fetch_article: article id search failed: %s", exc)
+            return None
+
+        for result in _iter_tweet_results(data):
+            found = _deep_get(result, "article", "article_results", "result", "rest_id")
+            if found == article_id:
+                tweet_id = result.get("rest_id")
+                if isinstance(tweet_id, str) and tweet_id:
+                    return tweet_id
+        return None
 
     def fetch_list_timeline(self, list_id, count=20, cursor=None, return_cursor=False):
         # type: (str, int, Optional[str], bool) -> Any

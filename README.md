@@ -156,10 +156,10 @@ twitter show 2                         # Open tweet #2 from last feed/search
 twitter show 2 --full-text             # Full text in reply table
 twitter show 2 --json                  # Structured output
 
-# Twitter Article
+# Twitter Article (accepts post ids, x.com/i/article/<id> links, and article entity ids)
 twitter article 1234567890
 twitter article https://x.com/user/article/1234567890 --json
-twitter article 1234567890 --markdown
+twitter article https://x.com/i/article/2038726133869625344 --markdown
 twitter article 1234567890 --output article.md
 
 # List timeline

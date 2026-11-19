@@ -3,6 +3,20 @@
 Fork of [public-clis/twitter-cli](https://github.com/public-clis/twitter-cli).
 Only fork-specific releases are listed here; everything up to `0.8.6` is upstream work.
 
+## 0.8.8
+
+- **fix(article):** `twitter article` now works with `x.com/i/article/<id>` links and bare
+  article entity ids. Article entity ids live in a different id space than posts, so
+  `TweetResultByRestId` returned nothing and the command failed with `Article not found`
+  for every article URL. Article ids are now resolved through `ArticleRedirectScreenQuery`
+  (the same query X's own client fires on an article page: `articleEntityId` →
+  `metadata.tweet_results.rest_id`), with a search-by-id fallback if that query id rotates.
+  Post ids still take the direct path — no extra request.
+- **fix(packaging):** install the package editable in the CLI venv, so repo edits take
+  effect instead of the stale `site-packages` copy.
+- **test:** four offline tests for article id resolution (direct hit, resolved hit,
+  `_iter_tweet_results` traversal, not-found).
+
 ## 0.8.7
 
 - **chore(queryIds):** refresh hardcoded `FALLBACK_QUERY_IDS` against the live signed-in bundle

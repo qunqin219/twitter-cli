@@ -1552,3 +1552,176 @@ class TestFetchSearchUsesPost:
 
         assert captured.get("product") == "Latest"
         assert captured.get("querySource") == "typed_query"
+
+
+# ── fetch_article: article entity id resolution ──────────────────────────
+
+
+def _article_tweet_payload(tweet_id: str, article_id: str, title: str = "T", body: str = "hello"):
+    """Minimal TweetResultByRestId payload carrying a long-form article."""
+    return {
+        "data": {
+            "tweetResult": {
+                "result": {
+                    "__typename": "Tweet",
+                    "rest_id": tweet_id,
+                    "legacy": {"full_text": "see article"},
+                    "core": {
+                        "user_results": {
+                            "result": {
+                                "legacy": {"screen_name": "author"},
+                                "core": {"screen_name": "author"},
+                            }
+                        }
+                    },
+                    "article": {
+                        "article_results": {
+                            "result": {
+                                "rest_id": article_id,
+                                "title": title,
+                                "content_state": {
+                                    "blocks": [
+                                        {
+                                            "key": "b1",
+                                            "text": body,
+                                            "type": "unstyled",
+                                            "entityRanges": [],
+                                            "inlineStyleRanges": [],
+                                        }
+                                    ],
+                                    "entityMap": {},
+                                },
+                                "media_entities": [],
+                                "cover_media": {},
+                            }
+                        }
+                    },
+                }
+            }
+        }
+    }
+
+
+def _search_payload(article_id: str, tweet_id: str):
+    """Minimal SearchTimeline payload where one tweet carries the article."""
+    return {
+        "data": {
+            "search_by_raw_query": {
+                "search_timeline": {
+                    "timeline": {
+                        "instructions": [
+                            {
+                                "type": "TimelineAddEntries",
+                                "entries": [
+                                    {
+                                        "content": {
+                                            "itemContent": {
+                                                "tweet_results": {
+                                                    "result": {
+                                                        "__typename": "Tweet",
+                                                        "rest_id": tweet_id,
+                                                        "legacy": {"full_text": "see article"},
+                                                        "article": {
+                                                            "article_results": {
+                                                                "result": {"rest_id": article_id}
+                                                            }
+                                                        },
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+
+class TestFetchArticleResolution:
+    def _make_client(self):
+        client = TwitterClient("auth", "ct0")
+        client._request_delay = 0
+        client._max_retries = 0
+        client._retry_base_delay = 0
+        client._max_count = 200
+        client._client_transaction = None
+        client._ct_init_attempted = True
+        return client
+
+    def test_iter_tweet_results_skips_non_tweets(self):
+        from twitter_cli.client import _iter_tweet_results
+
+        payload = {
+            "a": [{"__typename": "Tweet", "rest_id": "1"}],
+            "b": {"__typename": "TweetWithVisibilityResults", "tweet": {"__typename": "Tweet", "rest_id": "2"}},
+            "c": {"__typename": "User", "rest_id": "3"},
+        }
+        assert sorted(t["rest_id"] for t in _iter_tweet_results(payload)) == ["1", "2"]
+
+    def test_article_id_is_resolved_to_parent_tweet(self):
+        """Article ids resolve through ArticleRedirectScreenQuery, no search needed."""
+        client = self._make_client()
+        article_id, tweet_id = "2111111111111111111", "2222222222222222222"
+
+        calls = []
+
+        def mock_get(operation_name, variables, features, field_toggles=None):
+            calls.append((operation_name, variables))
+            if operation_name == "ArticleRedirectScreenQuery":
+                assert variables["articleEntityId"] == article_id
+                return {"data": {"article_result_by_rest_id": {"result": {"metadata": {"tweet_results": {"rest_id": tweet_id}}}}}}
+            if variables.get("tweetId") == tweet_id:
+                return _article_tweet_payload(tweet_id, article_id)
+            return {"data": {"tweetResult": {}}}  # article id is not a tweet
+
+        client._graphql_get = mock_get
+        client._graphql_post = lambda *a, **kw: pytest.fail("search must not run when redirect query works")
+
+        tweet = client.fetch_article(article_id)
+
+        assert tweet.article_title == "T"
+        assert [c[0] for c in calls] == ["TweetResultByRestId", "ArticleRedirectScreenQuery", "TweetResultByRestId"]
+
+    def test_falls_back_to_search_when_redirect_query_empty(self):
+        client = self._make_client()
+        article_id, tweet_id = "2111111111111111111", "2222222222222222222"
+
+        def mock_get(operation_name, variables, features, field_toggles=None):
+            if operation_name == "ArticleRedirectScreenQuery":
+                return {"data": {}}
+            if variables.get("tweetId") == tweet_id:
+                return _article_tweet_payload(tweet_id, article_id)
+            return {"data": {"tweetResult": {}}}
+
+        posts = []
+        client._graphql_get = mock_get
+        client._graphql_post = lambda op, variables, features=None: (posts.append(variables), _search_payload(article_id, tweet_id))[1]
+
+        tweet = client.fetch_article(article_id)
+
+        assert tweet.article_title == "T"
+        assert posts and posts[0]["rawQuery"] == article_id
+
+    def test_tweet_id_still_fetched_directly_without_search(self):
+        client = self._make_client()
+        tweet_id = "3333333333333333333"
+        client._graphql_get = lambda *a, **kw: _article_tweet_payload(tweet_id, "4444")
+        client._graphql_post = lambda *a, **kw: pytest.fail("search must not run for tweet ids")
+
+        tweet = client.fetch_article(tweet_id)
+
+        assert tweet.article_title == "T"
+
+    def test_missing_article_raises_not_found(self):
+        from twitter_cli.exceptions import NotFoundError
+
+        client = self._make_client()
+        client._graphql_get = lambda *a, **kw: {"data": {"tweetResult": {}}}
+        client._graphql_post = lambda *a, **kw: {"data": {}}
+
+        with pytest.raises(NotFoundError):
+            client.fetch_article("5555555555555555555")

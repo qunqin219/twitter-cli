@@ -61,6 +61,7 @@ FALLBACK_QUERY_IDS = {
     "CreateBookmark": "aoDbu3RHznuiSkQ9aNM67Q",
     "DeleteBookmark": "Wlmlj2-xzyS1GN3a6cj-mQ",
     "TweetResultByRestId": "U8lc5aomF5krJzZ9vJ9wxg",
+    "ArticleRedirectScreenQuery": "zrSRXJmE1vj37AUmkh2oGg",
     "BookmarkFoldersSlice": "i78YDd0Tza-dV4SYs58kRg",
     "BookmarkFolderTimeline": "hNY7X2xE2N7HVF6Qb_mu6w",
 }
