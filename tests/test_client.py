@@ -1725,3 +1725,52 @@ class TestFetchArticleResolution:
 
         with pytest.raises(NotFoundError):
             client.fetch_article("5555555555555555555")
+
+
+# ── ClientTransaction bootstrap ──────────────────────────────────────────
+
+
+class TestClientTransactionBootstrap:
+    """CT init must read the *signed-in* page; the logged-out shell has no
+    ondemand.s chunk entry, and without a transaction id every mutation that
+    needs one (bookmarks first) answers HTTP 404."""
+
+    def test_init_fetches_signed_in_page_with_cookies(self, monkeypatch):
+        import twitter_cli.client as client_mod
+
+        client = TwitterClient("auth-token", "csrf-token")
+        client._ct_init_attempted = False
+        client._client_transaction = None
+
+        calls = []
+
+        def fake_fetch(url, headers=None):
+            calls.append((url, dict(headers or {})))
+            if url.endswith("/home"):
+                return "<html>ondemand.s</html>"
+            return "javascript chunk"
+
+        monkeypatch.setattr(client_mod, "_get_cffi_session", lambda: None)
+        monkeypatch.setattr(client, "_authed_url_fetch", fake_fetch)
+        monkeypatch.setattr(client, "_load_ct_cache", lambda: False)
+        monkeypatch.setattr(client, "_save_ct_cache", lambda home, ondemand: None)
+        monkeypatch.setattr(client_mod, "_update_features_from_html", lambda html: None)
+        monkeypatch.setattr(
+            client_mod, "get_ondemand_file_url", lambda response: "https://abs.twimg.com/ondemand.js"
+        )
+        created = {}
+
+        class FakeCT:
+            def __init__(self, home_page_response, ondemand_file_response):
+                created["ok"] = bool(home_page_response) and ondemand_file_response == "javascript chunk"
+
+        monkeypatch.setattr(client_mod, "ClientTransaction", FakeCT)
+
+        client._ensure_client_transaction()
+
+        assert created.get("ok") is True
+        assert calls[0][0].endswith("x.com/home"), "must bootstrap from the signed-in page"
+        assert len(calls) == 2, "ondemand bundle is fetched once"
+        # Both fetches go through _authed_url_fetch, which injects the session
+        # cookies itself; that is what makes the signed-in chunk table visible.
+        assert all("ondemand" in c[0] or c[0].endswith("/home") for c in calls)

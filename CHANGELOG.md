@@ -3,6 +3,17 @@
 Fork of [public-clis/twitter-cli](https://github.com/public-clis/twitter-cli).
 Only fork-specific releases are listed here; everything up to `0.8.6` is upstream work.
 
+## 0.8.9
+
+- **fix(mutations):** bookmarks (and any mutation needing a transaction id) no longer fail with
+  HTTP 404. `_ensure_client_transaction` bootstrapped from the logged-out `https://x.com` shell,
+  which has no `ondemand.s` chunk entry, so `get_ondemand_file_url` raised and every request went
+  out without `x-client-transaction-id`. It now fetches `https://x.com/home` through
+  `_authed_url_fetch` (session cookies included) and pulls the ondemand bundle the same way.
+  Verified: `CreateBookmark` / `DeleteBookmark` return OK; forcing the old code path reproduces 404.
+- **test:** regression test that CT bootstrap hits the signed-in page and fetches the ondemand
+  bundle exactly once through the authenticated fetcher.
+
 ## 0.8.8
 
 - **fix(article):** `twitter article` now works with `x.com/i/article/<id>` links and bare

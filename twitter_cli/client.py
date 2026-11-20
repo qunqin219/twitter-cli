@@ -1235,29 +1235,27 @@ class TwitterClient:
             # Use curl_cffi for ClientTransaction init to maintain consistent
             # Chrome TLS fingerprint. Using Python requests here would leak
             # a different TLS fingerprint on the same IP — a detection vector.
-            cffi_session = _get_cffi_session()
             ct_headers = _gen_ct_headers()
-            home_page = cffi_session.get(
-                "https://x.com", headers=ct_headers, timeout=10,
-            )
-            home_page_response = bs4.BeautifulSoup(home_page.content, "html.parser")
+            # The chunk table (and therefore the ondemand.s bundle URL) only
+            # exists on the *signed-in* page: the logged-out shell has no
+            # `ondemand.s` entry, so this fetch must carry the session cookies.
+            home_html = self._authed_url_fetch("https://x.com/home", ct_headers)
+            home_page_response = bs4.BeautifulSoup(home_html, "html.parser")
             ondemand_url = get_ondemand_file_url(response=home_page_response)
             if not ondemand_url:
                 raise ValueError("Failed to extract ondemand file URL from homepage")
-            ondemand_file = cffi_session.get(
-                ondemand_url, headers=ct_headers, timeout=10,
-            )
+            ondemand_text = self._authed_url_fetch(ondemand_url, ct_headers)
             self._client_transaction = ClientTransaction(
                 home_page_response=home_page_response,
-                ondemand_file_response=ondemand_file.text,
+                ondemand_file_response=ondemand_text,
             )
             logger.info("ClientTransaction initialized for x-client-transaction-id")
 
             # Try to extract live FEATURES from the homepage JS bundles
-            _update_features_from_html(home_page.text)
+            _update_features_from_html(home_html)
 
             # Save to cache for future use
-            self._save_ct_cache(home_page.text, ondemand_file.text)
+            self._save_ct_cache(home_html, ondemand_text)
         except Exception as exc:
             logger.warning("Failed to init ClientTransaction: %s", exc)
 
