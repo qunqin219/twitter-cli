@@ -84,7 +84,6 @@ def test_authed_url_fetch_attaches_cookies():
 
     client = TwitterClient("tok123", "csrf456")
     client._cookie_string = None
-    original = graphql.__dict__.get("_url_fetch")
     import twitter_cli.client as client_mod
 
     client_mod._url_fetch, saved = fake_fetch, client_mod._url_fetch
